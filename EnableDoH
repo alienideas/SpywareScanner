@@ -1,0 +1,105 @@
+# Enable-DoH-Windows10.ps1
+# Enables DNS over HTTPS (DoH) on Windows 10
+# Requires: Run as Administrator
+# Recommended: Windows 10 build that supports DoH (21H2+)
+
+# Check for Administrator privileges
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host "ERROR: This script must be run as Administrator." -ForegroundColor Red
+    Write-Host "Right-click PowerShell and select 'Run as administrator', then try again." -ForegroundColor Yellow
+    pause
+    exit 1
+}
+
+Write-Host "=== Enabling DNS over HTTPS (DoH) on Windows 10 ===" -ForegroundColor Cyan
+Write-Host ""
+
+# 1. Enable Auto DoH via registry (value 2 = prefer/require encrypted DoH when possible)
+$regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters"
+$regName = "EnableAutoDoh"
+
+try {
+    if (-not (Test-Path $regPath)) {
+        New-Item -Path $regPath -Force | Out-Null
+    }
+    New-ItemProperty -Path $regPath -Name $regName -PropertyType DWord -Value 2 -Force | Out-Null
+    Write-Host "[OK] Registry key EnableAutoDoh set to 2 (DoH preferred/encrypted)." -ForegroundColor Green
+} catch {
+    Write-Host "[ERROR] Failed to set registry key: $_" -ForegroundColor Red
+}
+
+# 2. Ensure well-known DoH servers are registered (Cloudflare, Google, Quad9)
+# These are usually present by default on supported builds
+$dohServers = @(
+    @{ Address = "1.1.1.1";   Template = "https://cloudflare-dns.com/dns-query" },
+    @{ Address = "1.0.0.1";   Template = "https://cloudflare-dns.com/dns-query" },
+    @{ Address = "8.8.8.8";   Template = "https://dns.google/dns-query" },
+    @{ Address = "8.8.4.4";   Template = "https://dns.google/dns-query" },
+    @{ Address = "9.9.9.9";   Template = "https://dns.quad9.net/dns-query" },
+    @{ Address = "149.112.112.112"; Template = "https://dns.quad9.net/dns-query" }
+)
+
+Write-Host ""
+Write-Host "Registering / verifying DoH server templates..." -ForegroundColor Cyan
+
+foreach ($server in $dohServers) {
+    try {
+        # Try to add (harmless if already exists)
+        Add-DnsClientDohServerAddress -ServerAddress $server.Address -DohTemplate $server.Template -AllowFallbackToUdp $false -AutoUpgrade $true -ErrorAction SilentlyContinue
+        Write-Host "  - $($server.Address) -> $($server.Template)" -ForegroundColor Gray
+    } catch {
+        # Ignore if cmdlet not available or already present
+    }
+}
+
+# 3. Set DNS servers on active network adapters (using Cloudflare as default)
+Write-Host ""
+Write-Host "Setting DNS servers on active adapters to Cloudflare (1.1.1.1 / 1.0.0.1)..." -ForegroundColor Cyan
+
+$adapters = Get-NetAdapter | Where-Object { $_.Status -eq "Up" -and $_.InterfaceDescription -notmatch "Virtual|VPN|Hyper-V|VMware|Loopback" }
+
+if ($adapters) {
+    foreach ($adapter in $adapters) {
+        try {
+            Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses ("1.1.1.1", "1.0.0.1") -ErrorAction Stop
+            Write-Host "  [OK] $($adapter.Name) ($($adapter.InterfaceDescription))" -ForegroundColor Green
+        } catch {
+            Write-Host "  [WARN] Could not set DNS on $($adapter.Name): $_" -ForegroundColor Yellow
+        }
+    }
+} else {
+    Write-Host "  No suitable active adapters found. Set DNS manually if needed." -ForegroundColor Yellow
+}
+
+# 4. Optional: Try netsh global DoH setting (available on some builds)
+Write-Host ""
+Write-Host "Attempting netsh global DoH setting..." -ForegroundColor Cyan
+try {
+    netsh dnsclient set global doh=yes 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  [OK] netsh dnsclient set global doh=yes succeeded." -ForegroundColor Green
+    } else {
+        Write-Host "  [INFO] netsh DoH command not available or failed (normal on many Windows 10 builds)." -ForegroundColor Gray
+    }
+} catch {
+    Write-Host "  [INFO] netsh DoH not supported on this build." -ForegroundColor Gray
+}
+
+# 5. Flush DNS cache
+Write-Host ""
+Write-Host "Flushing DNS cache..." -ForegroundColor Cyan
+ipconfig /flushdns | Out-Null
+Write-Host "[OK] DNS cache flushed." -ForegroundColor Green
+
+# Summary
+Write-Host ""
+Write-Host "=== Done ===" -ForegroundColor Cyan
+Write-Host "DoH has been enabled via registry + Cloudflare DNS servers set." -ForegroundColor Green
+Write-Host ""
+Write-Host "Recommendations:" -ForegroundColor Yellow
+Write-Host "  1. Restart your computer for the registry change to fully take effect." -ForegroundColor White
+Write-Host "  2. Verify with: Get-DnsClientDohServerAddress" -ForegroundColor White
+Write-Host "  3. Or check: netsh dns show global  (look for DoH setting)" -ForegroundColor White
+Write-Host "  4. Test: Visit https://1.1.1.1/help or use a DNS leak test site." -ForegroundColor White
+Write-Host ""
+Write-Host "Note: On some Windows 10 builds the Settings GUI may not show DoH options." -ForegroundColor
